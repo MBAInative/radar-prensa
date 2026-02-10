@@ -131,6 +131,8 @@ function render() {
           <button class="primary" id="analyze" ${state.loading ? "disabled" : ""}>${state.loading ? "Analizando..." : "Valorar automáticamente"}</button>
           <button class="secondary" id="reset" ${state.loading ? "disabled" : ""}>Limpiar</button>
         </div>
+
+        ${renderHelp()}
       </div>
 
       <div class="card">
@@ -163,6 +165,24 @@ function dateField() {
       <label for="date">Fecha</label>
       <input id="date" type="date" value="${escapeHtml(state.date)}" />
     </div>
+  `;
+}
+
+function renderHelp() {
+  return `
+    <details class="help-box">
+      <summary>Ayuda: como usar la app</summary>
+      <ol>
+        <li>Escribe tu API key de OpenRouter.</li>
+        <li>Elige el modelo de IA en el selector (OpenAI, China o Europa).</li>
+        <li>Sube un PDF del articulo o pega texto manualmente.</li>
+        <li>Completa metadatos (titulo, medio, autor, fecha, seccion) si quieres.</li>
+        <li>Pulsa "Valorar automaticamente" y espera el diagnostico.</li>
+        <li>Revisa resultados y usa "Descargar informe (.txt)" para exportar.</li>
+      </ol>
+      <p class="small-note">Sugerencia: para analizar otro articulo, sube un nuevo PDF o pulsa "Limpiar".</p>
+      <p class="small-note">Si falla la conexion, confirma que el backend responda en http://localhost:5174/health.</p>
+    </details>
   `;
 }
 

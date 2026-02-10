@@ -304,6 +304,13 @@ function buildReportText(result) {
   lines.push("");
   lines.push(`Puntuacion global: ${result.overallScore}/100 (${result.label || scoreLabel(result.overallScore)})`);
   lines.push("");
+  lines.push("PARAMETROS DE VALORACION (8)");
+  lines.push("----------------------------");
+  criteria.forEach((item, index) => {
+    lines.push(`${index + 1}. ${item.title}: ${item.description}`);
+  });
+
+  lines.push("");
   lines.push("DIAGNOSTICO POR CRITERIO");
   lines.push("------------------------");
 

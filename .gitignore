@@ -6,3 +6,5 @@
 .DS_Store
 Thumbs.db
 .codex/
+_debug_wizard*.cmd
+_wizard_input*.txt

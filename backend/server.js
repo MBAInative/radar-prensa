@@ -1,8 +1,22 @@
 ﻿import http from "node:http";
 import pdfParse from "pdf-parse";
+import { readFileSync, existsSync } from "node:fs";
+
+/* ============ CONFIG ============ */
+// Support .env file for API key
+let envApiKey = "";
+try {
+  if (existsSync(".env")) {
+    const envContent = readFileSync(".env", "utf8");
+    const match = envContent.match(/OPENROUTER_API_KEY\s*=\s*(.+)/);
+    if (match) envApiKey = match[1].trim().replace(/^["']|["']$/g, "");
+  }
+} catch { }
+envApiKey = process.env.OPENROUTER_API_KEY || envApiKey;
 
 const port = Number(process.env.PORT || 5174);
 
+/* ============ RUBRIC ============ */
 const RUBRIC = [
   { id: "claridad", title: "Claridad" },
   { id: "veracidad", title: "Verificabilidad" },
@@ -14,6 +28,65 @@ const RUBRIC = [
   { id: "transparencia", title: "Transparencia" }
 ];
 
+const RUBRIC_IDS = new Set(RUBRIC.map(r => r.id));
+
+/* ============ RESPONSE SCHEMA ============ */
+const RESPONSE_SCHEMA = {
+  required: ["criteriaDetails", "strengths", "improvements", "editorialActions", "summary", "editorialVerdict"],
+  criteriaDetailKeys: ["score", "rationale", "evidence"],
+  arrayFields: { strengths: 3, improvements: 3, editorialActions: 3 },
+  stringMinLengths: { summary: 80, editorialVerdict: 20 },
+};
+
+function validateSchema(aiJson) {
+  const errors = [];
+
+  // Check top-level required fields
+  for (const field of RESPONSE_SCHEMA.required) {
+    if (aiJson[field] === undefined || aiJson[field] === null) {
+      errors.push(`Campo requerido ausente: ${field}`);
+    }
+  }
+
+  // Validate criteriaDetails structure
+  const details = aiJson?.criteriaDetails || {};
+  for (const item of RUBRIC) {
+    const d = details[item.id];
+    if (!d) {
+      errors.push(`Falta criterio: ${item.id}`);
+      continue;
+    }
+    if (typeof d.score !== "number" || d.score < 1 || d.score > 5) {
+      errors.push(`${item.id}.score debe ser 1-5, recibido: ${d.score}`);
+    }
+    if (isWeakText(d.rationale)) {
+      errors.push(`${item.id}.rationale es débil o vacío.`);
+    }
+    if (isWeakText(d.evidence)) {
+      errors.push(`${item.id}.evidence es débil o vacío.`);
+    }
+  }
+
+  // Validate arrays
+  for (const [field, minLen] of Object.entries(RESPONSE_SCHEMA.arrayFields)) {
+    const arr = cleanArray(aiJson?.[field]);
+    if (arr.length < minLen) {
+      errors.push(`${field} necesita al menos ${minLen} elementos, tiene ${arr.length}.`);
+    }
+  }
+
+  // Validate string lengths
+  for (const [field, minLen] of Object.entries(RESPONSE_SCHEMA.stringMinLengths)) {
+    const val = String(aiJson?.[field] || "").trim();
+    if (val.length < minLen) {
+      errors.push(`${field} demasiado breve (${val.length} < ${minLen} chars).`);
+    }
+  }
+
+  return { ok: errors.length === 0, errors };
+}
+
+/* ============ HELPERS ============ */
 function sendJson(res, statusCode, data) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
@@ -26,8 +99,10 @@ function sendJson(res, statusCode, data) {
 
 function extractJson(text) {
   const cleaned = String(text || "").trim();
-  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-  const candidate = fenced ? fenced[1] : cleaned;
+  // Remove <think>...</think> blocks from reasoning models
+  const noThink = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  const fenced = noThink.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = fenced ? fenced[1] : noThink;
   const first = candidate.indexOf("{");
   const last = candidate.lastIndexOf("}");
   if (first === -1 || last === -1 || last <= first) {
@@ -42,23 +117,23 @@ function clampScore(value) {
   return Math.min(5, Math.max(1, Math.round(num)));
 }
 
-function cleanArray(value, min = 0, max = 4) {
+function cleanArray(value, min = 0, max = 5) {
   const arr = Array.isArray(value)
-    ? value.map((item) => String(item || "").trim()).filter(Boolean)
+    ? value.map(item => String(item || "").trim()).filter(Boolean)
     : [];
   return arr.slice(0, Math.max(min, max));
 }
 
 function isWeakText(value) {
   const text = String(value || "").trim().toLowerCase();
-  if (!text) return true;
+  if (!text || text.length < 10) return true;
   return text.includes("sin detalle") || text.includes("no reportada") || text.includes("sin datos");
 }
 
+/* ============ CRITERIA DETAILS ============ */
 function buildCriteriaDetails(aiJson) {
   const detailsInput = aiJson?.criteriaDetails || {};
   const details = {};
-
   for (const item of RUBRIC) {
     const detail = detailsInput[item.id] || {};
     details[item.id] = {
@@ -67,7 +142,6 @@ function buildCriteriaDetails(aiJson) {
       evidence: String(detail.evidence || "").trim()
     };
   }
-
   return details;
 }
 
@@ -75,8 +149,8 @@ function getSentenceCandidates(articleText) {
   return String(articleText || "")
     .replace(/\s+/g, " ")
     .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= 40 && s.length <= 220);
+    .map(s => s.trim())
+    .filter(s => s.length >= 40 && s.length <= 220);
 }
 
 function pickEvidence(articleText, criterionId) {
@@ -90,39 +164,30 @@ function pickEvidence(articleText, criterionId) {
     dato: ["%", "millones", "miles", "estadística", "encuesta"],
     transparencia: ["limitación", "metodología", "no se pudo", "margen de error"]
   };
-
   const candidates = getSentenceCandidates(articleText);
   const keywords = keywordsByCriterion[criterionId] || [];
-  const lowered = candidates.map((s) => s.toLowerCase());
-
-  for (let i = 0; i < lowered.length; i += 1) {
-    if (keywords.some((k) => lowered[i].includes(k))) {
-      return candidates[i].slice(0, 180);
-    }
+  const lowered = candidates.map(s => s.toLowerCase());
+  for (let i = 0; i < lowered.length; i++) {
+    if (keywords.some(k => lowered[i].includes(k))) return candidates[i].slice(0, 180);
   }
-
-  return (candidates[0] || String(articleText || "").slice(0, 180) || "No se identificó evidencia textual sólida.")
-    .slice(0, 180);
+  return (candidates[0] || String(articleText || "").slice(0, 180) || "No se identificó evidencia textual sólida.").slice(0, 180);
 }
 
 function fallbackRationale(criterionId, score) {
-  const low = "La evidencia disponible en el texto es insuficiente para sostener un estándar alto en este criterio.";
-  const mid = "El criterio se cumple parcialmente: hay señales útiles, pero falta mayor precisión o contraste.";
-  const high = "El artículo presenta señales consistentes para este criterio y sostiene la evaluación con elementos verificables.";
   const byCriterion = {
-    claridad: "La redacción muestra tramos comprensibles, pero puede mejorar en precisión y definición de ideas clave.",
-    veracidad: "Se observan afirmaciones con soporte limitado; faltan elementos de verificación más explícitos.",
-    fuentes: "La diversidad y trazabilidad de fuentes no queda suficientemente demostrada en el texto analizado.",
-    contexto: "Se aporta algo de marco, aunque no siempre conecta de forma completa causas, antecedentes y consecuencias.",
-    balance: "Predomina una perspectiva; faltan contrapuntos desarrollados para equilibrar la cobertura.",
-    estructura: "Existe hilo narrativo básico, pero la progresión argumental puede organizarse mejor.",
-    dato: "Aparecen datos puntuales, pero falta comparación o atribución robusta para fortalecer conclusiones.",
-    transparencia: "No se explicitan con suficiente detalle límites metodológicos o incertidumbres de la información."
+    claridad: "La redacción muestra tramos comprensibles, pero puede mejorar en precisión.",
+    veracidad: "Se observan afirmaciones con soporte limitado; faltan elementos de verificación.",
+    fuentes: "La diversidad y trazabilidad de fuentes no queda suficientemente demostrada.",
+    contexto: "Se aporta algo de marco, aunque no siempre conecta causas y consecuencias.",
+    balance: "Predomina una perspectiva; faltan contrapuntos desarrollados.",
+    estructura: "Existe hilo narrativo básico, pero la progresión puede organizarse mejor.",
+    dato: "Aparecen datos puntuales, pero falta comparación o atribución robusta.",
+    transparencia: "No se explicitan con suficiente detalle límites o incertidumbres."
   };
-  const base = byCriterion[criterionId] || mid;
-  if (score <= 2) return `${base} ${low}`;
-  if (score >= 4) return `${base} ${high}`;
-  return `${base} ${mid}`;
+  const base = byCriterion[criterionId] || "El criterio se cumple parcialmente.";
+  if (score <= 2) return `${base} La evidencia disponible es insuficiente para un estándar alto.`;
+  if (score >= 4) return `${base} El artículo presenta señales consistentes y verificables.`;
+  return `${base} Hay señales útiles, pero falta mayor precisión o contraste.`;
 }
 
 function enforceCriteriaDetails(details, articleText) {
@@ -142,83 +207,36 @@ function enforceCriteriaDetails(details, articleText) {
   return output;
 }
 
-function validateAiJson(aiJson) {
-  const errors = [];
-  const details = buildCriteriaDetails(aiJson);
-
-  for (const item of RUBRIC) {
-    const detail = details[item.id];
-    if (!detail || isWeakText(detail.rationale)) {
-      errors.push(`Falta justificación sólida en ${item.id}.`);
-    }
-    if (!detail || isWeakText(detail.evidence)) {
-      errors.push(`Falta evidencia textual en ${item.id}.`);
-    }
-  }
-
-  const strengths = cleanArray(aiJson?.strengths);
-  const improvements = cleanArray(aiJson?.improvements);
-  if (strengths.length < 3) errors.push("strengths debe incluir al menos 3 elementos.");
-  if (improvements.length < 3) errors.push("improvements debe incluir al menos 3 elementos.");
-
-  const summary = String(aiJson?.summary || "").trim();
-  const verdict = String(aiJson?.editorialVerdict || "").trim();
-  if (summary.length < 80) errors.push("summary es demasiado breve.");
-  if (verdict.length < 20) errors.push("editorialVerdict es demasiado breve.");
-
-  return { ok: errors.length === 0, errors };
-}
-
+/* ============ METADATA ============ */
 function extractMetadataHeuristic(articleText) {
-  const lines = String(articleText || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  const titleCandidate = lines.find((line) => line.length > 20 && line.length < 140) || "";
-  return {
-    title: titleCandidate,
-    outlet: "",
-    author: "",
-    date: "",
-    section: ""
-  };
+  const lines = String(articleText || "").split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const titleCandidate = lines.find(l => l.length > 20 && l.length < 140) || "";
+  return { title: titleCandidate, outlet: "", author: "", date: "", section: "" };
 }
 
 function normalizeMetadata(payload, aiJson, heuristicMeta) {
   const aiMeta = aiJson?.metadataExtracted || {};
-  const take = (key) => {
+  const take = key => {
     const user = String(payload?.[key] || "").trim();
     if (user) return user;
     const ai = String(aiMeta?.[key] || "").trim();
     if (ai) return ai;
     return String(heuristicMeta?.[key] || "").trim();
   };
-
-  return {
-    title: take("title"),
-    outlet: take("outlet"),
-    author: take("author"),
-    date: take("date"),
-    section: take("section")
-  };
+  return { title: take("title"), outlet: take("outlet"), author: take("author"), date: take("date"), section: take("section") };
 }
 
+/* ============ RESULT BUILDER ============ */
 function fillMinimumItems(items, fallback, total = 3) {
   const output = [...items];
-  for (const extra of fallback) {
-    if (output.length >= total) break;
-    output.push(extra);
-  }
+  for (const extra of fallback) { if (output.length >= total) break; output.push(extra); }
   return output.slice(0, total);
 }
 
 function buildNormalizedResult(aiJson, articleText, payload) {
   const criteriaDetails = enforceCriteriaDetails(buildCriteriaDetails(aiJson), articleText);
   const scores = {};
-  for (const item of RUBRIC) {
-    scores[item.id] = criteriaDetails[item.id].score;
-  }
+  for (const item of RUBRIC) scores[item.id] = criteriaDetails[item.id].score;
 
   const avg = RUBRIC.reduce((sum, item) => sum + scores[item.id], 0) / RUBRIC.length;
   const overallScore = Math.round(avg * 20);
@@ -232,101 +250,74 @@ function buildNormalizedResult(aiJson, articleText, payload) {
   const words = text ? text.split(/\s+/).length : 0;
   const sentences = text ? text.split(/[.!?]+/).filter(Boolean).length : 0;
 
-  const strengthsRaw = cleanArray(aiJson?.strengths, 0, 5);
-  const improvementsRaw = cleanArray(aiJson?.improvements, 0, 5);
-  const editorialActionsRaw = cleanArray(aiJson?.editorialActions, 0, 5);
-
-  const strengths = fillMinimumItems(strengthsRaw, [
+  const strengths = fillMinimumItems(cleanArray(aiJson?.strengths, 0, 5), [
     "Presenta hilo narrativo identificable.",
     "Contiene información contextual útil.",
     "Permite construir una hipótesis editorial."
   ]);
-
-  const improvements = fillMinimumItems(improvementsRaw, [
+  const improvements = fillMinimumItems(cleanArray(aiJson?.improvements, 0, 5), [
     "Añadir fuentes verificables con cita explícita.",
     "Diferenciar hechos de opinión.",
     "Incluir datos comparables y trazables."
   ]);
-
-  const editorialActions = fillMinimumItems(editorialActionsRaw, improvements, 3);
-
-  const summary = String(aiJson?.summary || "").trim();
-  const editorialVerdict = String(aiJson?.editorialVerdict || "").trim() || improvements[0];
-  const heuristicMeta = extractMetadataHeuristic(articleText);
+  const editorialActions = fillMinimumItems(cleanArray(aiJson?.editorialActions, 0, 5), improvements, 3);
 
   return {
-    overallScore,
-    label,
-    scores,
-    criteriaDetails,
-    strengths,
-    improvements,
-    editorialActions,
-    summary,
-    editorialVerdict,
-    metadata: normalizeMetadata(payload, aiJson, heuristicMeta),
-    signals: {
-      words,
-      sentences
-    }
+    overallScore, label, scores, criteriaDetails,
+    strengths, improvements, editorialActions,
+    summary: String(aiJson?.summary || "").trim(),
+    editorialVerdict: String(aiJson?.editorialVerdict || "").trim() || improvements[0],
+    metadata: normalizeMetadata(payload, aiJson, extractMetadataHeuristic(articleText)),
+    signals: { words, sentences }
   };
 }
 
+/* ============ NETWORK ============ */
 async function readJsonBody(req, maxBytes = 8 * 1024 * 1024) {
   const chunks = [];
   let size = 0;
-
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > maxBytes) {
-      throw new Error("Payload demasiado grande (máximo 8MB).");
-    }
+    if (size > maxBytes) throw new Error("Payload demasiado grande (máximo 8MB).");
     chunks.push(chunk);
   }
-
-  const raw = Buffer.concat(chunks).toString("utf8");
-  return JSON.parse(raw || "{}");
+  return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
-async function extractArticleText({ pdfBase64, articleText }) {
+async function extractArticleText({ pdfBase64, articleText, enableOcr }) {
   const manualText = String(articleText || "").trim();
-  if (manualText) {
-    return { articleText: manualText, source: "manual" };
-  }
+  if (manualText) return { articleText: manualText, source: "manual" };
 
   const encoded = String(pdfBase64 || "").trim();
-  if (!encoded) {
-    throw new Error("Debes subir un PDF o pegar el texto del artículo.");
-  }
+  if (!encoded) throw new Error("Debes subir un PDF o pegar el texto del artículo.");
 
   const buffer = Buffer.from(encoded, "base64");
   const parsed = await pdfParse(buffer);
-  const text = String(parsed.text || "").trim();
+  let text = String(parsed.text || "").trim();
 
-  if (!text) {
-    throw new Error("No se pudo extraer texto útil del PDF.");
+  // If text is too short and OCR is enabled, mark it
+  if (text.length < 100 && enableOcr) {
+    return {
+      articleText: text || "[PDF escaneado sin texto extraíble — se requiere OCR del lado del cliente]",
+      source: "pdf-ocr-needed",
+      ocrHint: true
+    };
   }
 
+  if (!text) throw new Error("No se pudo extraer texto útil del PDF.");
   return { articleText: text, source: "pdf" };
 }
 
+/* ============ PROMPT ============ */
 function buildPrompt(payload, articleText) {
-  const criteriaText = RUBRIC.map((item) => `- ${item.id}: ${item.title}`).join("\n");
-
+  const criteriaText = RUBRIC.map(item => `- ${item.id}: ${item.title}`).join("\n");
   return [
     "Eres editor senior de calidad periodística y fact-checking.",
     "Evalúa con rigor editorial real, evita generalidades y justifica cada nota con evidencia textual del artículo.",
-    "Devuelve SOLO JSON válido (sin markdown) con esta forma exacta:",
+    "Devuelve SOLO JSON válido (sin markdown ni texto adicional) con esta forma exacta:",
     "{",
     '  "criteriaDetails": {',
-    '    "claridad": { "score": 1-5, "rationale": "...", "evidence": "..." },',
-    '    "veracidad": { "score": 1-5, "rationale": "...", "evidence": "..." },',
-    '    "fuentes": { "score": 1-5, "rationale": "...", "evidence": "..." },',
-    '    "contexto": { "score": 1-5, "rationale": "...", "evidence": "..." },',
-    '    "balance": { "score": 1-5, "rationale": "...", "evidence": "..." },',
-    '    "estructura": { "score": 1-5, "rationale": "...", "evidence": "..." },',
-    '    "dato": { "score": 1-5, "rationale": "...", "evidence": "..." },',
-    '    "transparencia": { "score": 1-5, "rationale": "...", "evidence": "..." }',
+    ...RUBRIC.map(item => `    "${item.id}": { "score": 1-5, "rationale": "...", "evidence": "..." },`),
     "  },",
     '  "strengths": ["...", "...", "..."],',
     '  "improvements": ["...", "...", "..."],',
@@ -341,22 +332,12 @@ function buildPrompt(payload, articleText) {
     "- evidence: cita breve literal del texto (max 180 caracteres).",
     "- strengths/improvements/editorialActions: exactamente 3 elementos cada lista.",
     "- summary: 4-6 frases con conclusión editorial.",
-    "- editorialVerdict: una recomendación final breve para redacción.",
+    "- editorialVerdict: una recomendación final breve.",
     "- Si falta evidencia para un criterio, baja la puntuación y explica por qué.",
-    "Rúbrica:",
-    criteriaText,
+    "- IMPORTANTE: Devuelve SOLO el JSON, sin texto antes ni después.",
+    "Rúbrica:", criteriaText,
     "\nMetadata aportada por usuario:",
-    JSON.stringify(
-      {
-        title: payload.title || "",
-        outlet: payload.outlet || "",
-        author: payload.author || "",
-        date: payload.date || "",
-        section: payload.section || ""
-      },
-      null,
-      2
-    ),
+    JSON.stringify({ title: payload.title || "", outlet: payload.outlet || "", author: payload.author || "", date: payload.date || "", section: payload.section || "" }, null, 2),
     "\nTexto del artículo:",
     articleText
   ].join("\n");
@@ -365,14 +346,15 @@ function buildPrompt(payload, articleText) {
 function buildRepairPrompt(rawModelOutput, validationErrors) {
   return [
     "Corrige tu salida anterior y devuelve SOLO JSON válido.",
-    "No añadas markdown ni texto adicional.",
+    "No añadas markdown, texto adicional, ni bloques think.",
     "Errores detectados:",
-    ...validationErrors.map((err) => `- ${err}`),
+    ...validationErrors.map(err => `- ${err}`),
     "Salida anterior del modelo:",
-    rawModelOutput
+    rawModelOutput.slice(0, 3000)
   ].join("\n");
 }
 
+/* ============ OPENROUTER ============ */
 async function callOpenRouterRaw({ apiKey, model, prompt }) {
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -385,90 +367,69 @@ async function callOpenRouterRaw({ apiKey, model, prompt }) {
     body: JSON.stringify({
       model: model || "openai/gpt-4.1-mini",
       temperature: 0.1,
-      messages: [
-        {
-          role: "user",
-          content: prompt
-        }
-      ]
+      messages: [{ role: "user", content: prompt }]
     })
   });
-
   const raw = await response.text();
-  if (!response.ok) {
-    throw new Error(`OpenRouter error (${response.status}): ${raw.slice(0, 300)}`);
-  }
-
+  if (!response.ok) throw new Error(`OpenRouter error (${response.status}): ${raw.slice(0, 300)}`);
   const json = JSON.parse(raw);
   const content = json?.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error("OpenRouter no devolvió contenido evaluable.");
-  }
-
+  if (!content) throw new Error("OpenRouter no devolvió contenido evaluable.");
   return content;
 }
 
 async function evaluateWithRetry({ apiKey, model, prompt }) {
   const firstContent = await callOpenRouterRaw({ apiKey, model, prompt });
-
   let firstJson;
-  try {
-    firstJson = extractJson(firstContent);
-  } catch {
-    firstJson = null;
-  }
+  try { firstJson = extractJson(firstContent); } catch { firstJson = null; }
 
   if (firstJson) {
-    const check = validateAiJson(firstJson);
+    const check = validateSchema(firstJson);
     if (check.ok) return firstJson;
 
+    console.log(`[Retry] Schema validation failed (${check.errors.length} errors), attempting repair...`);
     const repairPrompt = buildRepairPrompt(firstContent, check.errors);
     const secondContent = await callOpenRouterRaw({ apiKey, model, prompt: repairPrompt });
     const secondJson = extractJson(secondContent);
-    const secondCheck = validateAiJson(secondJson);
-    if (secondCheck.ok) return secondJson;
-    return secondJson;
+    return secondJson; // Best effort
   }
 
+  console.log("[Retry] JSON parse failed, attempting repair...");
   const repairPrompt = buildRepairPrompt(firstContent, ["JSON inválido en la primera respuesta."]);
   const secondContent = await callOpenRouterRaw({ apiKey, model, prompt: repairPrompt });
   return extractJson(secondContent);
 }
 
+/* ============ SERVER ============ */
 const server = http.createServer(async (req, res) => {
   try {
-    if (req.method === "OPTIONS") {
-      sendJson(res, 204, {});
-      return;
-    }
+    if (req.method === "OPTIONS") { sendJson(res, 204, {}); return; }
 
     if (req.method === "GET" && req.url === "/health") {
-      sendJson(res, 200, { status: "ok" });
+      sendJson(res, 200, { status: "ok", envKeySet: !!envApiKey });
       return;
     }
 
     if (req.method === "POST" && req.url === "/api/evaluate") {
       const body = await readJsonBody(req);
-      const apiKey = String(body.apiKey || "").trim();
+      // API key: prefer body, fallback to env
+      const apiKey = String(body.apiKey || "").trim() || envApiKey;
       const selectedModel = String(body.model || "").trim() || "openai/gpt-4.1-mini";
+
       if (!apiKey) {
-        sendJson(res, 400, { error: "Falta la API key de OpenRouter." });
+        sendJson(res, 400, { error: "Falta la API key de OpenRouter (ni en body ni en .env)." });
         return;
       }
 
-      const { articleText, source } = await extractArticleText(body);
+      const { articleText, source, ocrHint } = await extractArticleText(body);
       const prompt = buildPrompt(body, articleText);
-      const aiJson = await evaluateWithRetry({
-        apiKey,
-        model: selectedModel,
-        prompt
-      });
-
+      const aiJson = await evaluateWithRetry({ apiKey, model: selectedModel, prompt });
       const result = buildNormalizedResult(aiJson, articleText, body);
+
       sendJson(res, 200, {
-        source,
-        modelUsed: selectedModel,
+        source, modelUsed: selectedModel,
         extractedTextLength: articleText.length,
+        ...(ocrHint ? { ocrHint: true } : {}),
         ...result
       });
       return;
@@ -476,10 +437,13 @@ const server = http.createServer(async (req, res) => {
 
     sendJson(res, 404, { error: "Not found" });
   } catch (error) {
+    console.error("[Error]", error.message);
     sendJson(res, 500, { error: error.message || "Error interno" });
   }
 });
 
 server.listen(port, () => {
-  console.log(`Backend escuchando en http://localhost:${port}`);
+  console.log(`✅ Backend escuchando en http://localhost:${port}`);
+  if (envApiKey) console.log("🔑 API key cargada desde .env");
+  else console.log("⚠️  Sin API key en .env — se requiere desde el frontend");
 });

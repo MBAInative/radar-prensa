@@ -1,6 +1,47 @@
 ﻿import http from "node:http";
 import pdfParse from "pdf-parse";
 import { readFileSync, existsSync } from "node:fs";
+import { join, extname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = fileURLToPath(new URL(".", import.meta.url));
+const FRONTEND_DIR = resolve(__dirname, "..", "frontend");
+
+const MIME_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+};
+
+function serveStatic(req, res) {
+  let urlPath = req.url.split("?")[0];
+  if (urlPath === "/" || urlPath === "") urlPath = "/index.html";
+  const fullPath = join(FRONTEND_DIR, urlPath);
+  // Security: prevent directory traversal
+  if (!fullPath.startsWith(FRONTEND_DIR)) {
+    res.writeHead(403); res.end("Forbidden"); return;
+  }
+  if (!existsSync(fullPath)) {
+    // SPA fallback — serve index.html
+    const indexPath = join(FRONTEND_DIR, "index.html");
+    if (existsSync(indexPath)) {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(readFileSync(indexPath));
+      return;
+    }
+    res.writeHead(404); res.end("Not found"); return;
+  }
+  const mime = MIME_TYPES[extname(fullPath).toLowerCase()] || "application/octet-stream";
+  res.writeHead(200, { "Content-Type": mime });
+  res.end(readFileSync(fullPath));
+}
 
 /* ============ CONFIG ============ */
 // Support .env file for API key
@@ -435,7 +476,8 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    sendJson(res, 404, { error: "Not found" });
+    // Serve frontend static files for any other request
+    serveStatic(req, res);
   } catch (error) {
     console.error("[Error]", error.message);
     sendJson(res, 500, { error: error.message || "Error interno" });

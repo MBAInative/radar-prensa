@@ -27,7 +27,7 @@ const state = {
 };
 
 /* ============ CONSTANTS ============ */
-const BACKEND_CANDIDATES = ["http://127.0.0.1:5174", "http://localhost:5174"];
+const BACKEND_CANDIDATES = ["", "http://127.0.0.1:5174", "http://localhost:5174"];
 
 const MODEL_PRESETS = [
   { region: "Google", id: "google/gemini-2.5-pro-preview", label: "Gemini 2.5 Pro" },

@@ -402,7 +402,7 @@ async function callOpenRouterRaw({ apiKey, model, prompt }) {
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "http://localhost:5173",
+      "HTTP-Referer": process.env.RENDER_EXTERNAL_URL || "http://localhost:5173",
       "X-Title": "Radar de Calidad Periodistica"
     },
     body: JSON.stringify({

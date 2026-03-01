@@ -889,6 +889,7 @@ function download(blob, name) {
 
 /* ============ BATCH PROCESSING ============ */
 async function runBatch() {
+  console.log("runBatch started", { files: state.batchFiles.length, key: !!state.apiKey });
   if (!state.apiKey.trim()) { state.error = "Introduce tu API key."; render(); return; }
   if (!state.batchFiles.length) { state.error = "Selecciona al menos un PDF."; render(); return; }
 
@@ -898,61 +899,68 @@ async function runBatch() {
   state.error = "";
   render();
 
-  // Pre-load jsPDF if auto-download is on
-  if (state.batchAutoDownload) {
-    try { await ensureJsPdf(); } catch { }
-  }
-
-  for (let i = 0; i < state.batchFiles.length; i++) {
-    state.batchCurrent = i;
-    render();
-
-    const file = state.batchFiles[i];
-    try {
-      const pdfBase64 = await fileToBase64(file);
-      const payload = {
-        apiKey: state.apiKey.trim(),
-        model: state.model.trim() || "openai/gpt-4.1-mini",
-        pdfBase64,
-        title: "", outlet: "", author: "", date: "", section: "",
-        articleText: "",
-        enableOcr: false,
-      };
-
-      const { response, data } = await postEvaluate(payload);
-      if (!response.ok) throw new Error(data?.error || "Error al evaluar.");
-
-      state.batchResults.push({ file: file.name, result: data });
-
-      // Save to history
-      const historyEntry = { ...data, analyzedAt: new Date().toISOString() };
-      state.historyItems.unshift(historyEntry);
-      saveHistory();
-
-      // Auto-download PDF (now deferred to the end of the batch loop)
-    } catch (err) {
-      const msg = String(err?.message || "").includes("BACKEND_UNREACHABLE")
-        ? "Backend no disponible"
-        : (err.message || "Error desconocido");
-      state.batchResults.push({ file: file.name, error: msg });
+  try {
+    // Pre-load jsPDF if auto-download is on
+    if (state.batchAutoDownload) {
+      try { await ensureJsPdf(); } catch (e) { console.error("jsPDF load warning", e); }
     }
 
-    render();
+    for (let i = 0; i < state.batchFiles.length; i++) {
+      state.batchCurrent = i;
+      render();
 
-    // Small delay between requests to avoid rate limiting
-    if (i < state.batchFiles.length - 1) {
-      await new Promise(r => setTimeout(r, 500));
+      const file = state.batchFiles[i];
+      try {
+        const pdfBase64 = await fileToBase64(file);
+        const payload = {
+          apiKey: state.apiKey.trim(),
+          model: state.model.trim() || "openai/gpt-4.1-mini",
+          pdfBase64,
+          title: "", outlet: "", author: "", date: "", section: "",
+          articleText: "",
+          enableOcr: false,
+        };
+
+        console.log(`Sending payload for file ${i + 1}/${state.batchFiles.length}:`, file.name);
+        const { response, data } = await postEvaluate(payload);
+        if (!response.ok) throw new Error(data?.error || "Error al evaluar.");
+
+        state.batchResults.push({ file: file.name, result: data });
+
+        // Save to history
+        const historyEntry = { ...data, analyzedAt: new Date().toISOString() };
+        state.historyItems.unshift(historyEntry);
+        saveHistory();
+
+      } catch (err) {
+        console.error("Batch item error:", err);
+        const msg = String(err?.message || "").includes("BACKEND_UNREACHABLE")
+          ? "Backend no disponible"
+          : (err.message || "Error desconocido");
+        state.batchResults.push({ file: file.name, error: msg });
+      }
+
+      render();
+
+      // Small delay between requests to avoid rate limiting
+      if (i < state.batchFiles.length - 1) {
+        await new Promise(r => setTimeout(r, 500));
+      }
     }
-  }
 
-  // Auto-download consolidated PDF at the end of the batch
-  if (state.batchAutoDownload && state.batchResults.some(br => br.result) && typeof window.jspdf !== "undefined") {
-    downloadAllBatchPdfsSync();
+    // Auto-download consolidated PDF at the end of the batch
+    if (state.batchAutoDownload && state.batchResults.some(br => br.result) && typeof window.jspdf !== "undefined") {
+      downloadAllBatchPdfsSync();
+    }
+  } catch (criticalErr) {
+    console.error("Critical batch error:", criticalErr);
+    alert("Error crítico en el proceso por lotes: " + criticalErr.message);
+    state.error = "Error crítico: " + criticalErr.message;
+  } finally {
+    state.batchRunning = false;
+    state.batchCurrent = -1;
+    render();
   }
-
-  state.batchRunning = false;
-  state.batchCurrent = -1;
-  render();
 }
 
 async function downloadAllBatchPdfs() {

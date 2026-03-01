@@ -314,12 +314,12 @@ function buildNormalizedResult(aiJson, articleText, payload) {
 }
 
 /* ============ NETWORK ============ */
-async function readJsonBody(req, maxBytes = 8 * 1024 * 1024) {
+async function readJsonBody(req, maxBytes = 20 * 1024 * 1024) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > maxBytes) throw new Error("Payload demasiado grande (máximo 8MB).");
+    if (size > maxBytes) throw new Error("Payload demasiado grande (límite subido a 20MB para admitir PDFs pesados).");
     chunks.push(chunk);
   }
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");

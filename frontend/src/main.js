@@ -354,7 +354,7 @@ function renderBatch() {
 
       <div class="ocr-toggle">
         <input type="checkbox" id="batchAutoDownload" ${state.batchAutoDownload ? "checked" : ""} />
-        <label for="batchAutoDownload" style="margin:0;color:var(--text)">Descargar PDF automáticamente tras cada análisis</label>
+        <label for="batchAutoDownload" style="margin:0;color:var(--text)">Descargar un único PDF consolidado al terminar el lote</label>
       </div>
 
       ${!state.batchRunning && total > 0 ? `
@@ -425,7 +425,7 @@ function renderBatchResults(successes, errors) {
   }).join("")}
       </div>
       <div class="actions mt-1">
-        <button class="secondary" id="batchDownloadAll">📦 Descargar todos los PDFs</button>
+        <button class="secondary" id="batchDownloadAll">📦 Descargar informe completo (PDF único)</button>
         <button class="secondary" id="batchClearResults">🗑 Limpiar resultados</button>
       </div>
     </div>`;
@@ -806,9 +806,7 @@ function ensureJsPdf() {
   });
 }
 
-function generatePdfBlob(r) {
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF();
+function addResultToPdf(doc, r) {
   const margin = 15;
   let y = 20;
   const pageW = doc.internal.pageSize.getWidth() - margin * 2;
@@ -851,8 +849,13 @@ function generatePdfBlob(r) {
   addLine(r.summary || "Sin resumen");
   addLine("VEREDICTO", { size: 12, bold: true });
   addLine(r.editorialVerdict || "Sin veredicto");
+}
 
-  return { doc, filename: `informe-${sanitize(meta.title || "articulo")}-${new Date().toISOString().slice(0, 10)}.pdf` };
+function generatePdfBlob(r) {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  addResultToPdf(doc, r);
+  return { doc, filename: `informe-${sanitize((r.metadata || {}).title || "articulo")}-${new Date().toISOString().slice(0, 10)}.pdf` };
 }
 
 async function downloadPdfForResult(r, sourceFilename) {
@@ -926,11 +929,7 @@ async function runBatch() {
       state.historyItems.unshift(historyEntry);
       saveHistory();
 
-      // Auto-download PDF
-      if (state.batchAutoDownload && typeof window.jspdf !== "undefined") {
-        downloadPdfForResult(data, file.name);
-      }
-
+      // Auto-download PDF (now deferred to the end of the batch loop)
     } catch (err) {
       const msg = String(err?.message || "").includes("BACKEND_UNREACHABLE")
         ? "Backend no disponible"
@@ -946,6 +945,11 @@ async function runBatch() {
     }
   }
 
+  // Auto-download consolidated PDF at the end of the batch
+  if (state.batchAutoDownload && state.batchResults.some(br => br.result) && typeof window.jspdf !== "undefined") {
+    downloadAllBatchPdfsSync();
+  }
+
   state.batchRunning = false;
   state.batchCurrent = -1;
   render();
@@ -957,11 +961,26 @@ async function downloadAllBatchPdfs() {
   } catch {
     state.error = "No se pudo cargar jsPDF."; render(); return;
   }
+  downloadAllBatchPdfsSync();
+}
+
+function downloadAllBatchPdfsSync() {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  let firstPage = true;
+
   for (const br of state.batchResults) {
     if (br.result) {
-      downloadPdfForResult(br.result, br.file);
-      await new Promise(r => setTimeout(r, 300)); // stagger downloads
+      if (!firstPage) {
+        doc.addPage();
+      }
+      firstPage = false;
+      addResultToPdf(doc, br.result);
     }
+  }
+
+  if (!firstPage) {
+    doc.save(`informe-lote-${state.batchResults.filter(r => r.result).length}-articulos-${new Date().toISOString().slice(0, 10)}.pdf`);
   }
 }
 

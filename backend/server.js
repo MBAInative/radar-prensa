@@ -451,7 +451,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "POST" && req.url === "/api/evaluate") {
+    if (req.method === "POST" && req.url.split('?')[0] === "/api/evaluate") {
       const body = await readJsonBody(req);
       // API key: prefer body, fallback to env
       const apiKey = String(body.apiKey || "").trim() || envApiKey;

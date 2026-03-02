@@ -470,6 +470,7 @@ const server = http.createServer(async (req, res) => {
       sendJson(res, 200, {
         source, modelUsed: selectedModel,
         extractedTextLength: articleText.length,
+        rawArticleText: articleText,
         ...(ocrHint ? { ocrHint: true } : {}),
         ...result
       });

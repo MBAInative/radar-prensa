@@ -426,6 +426,7 @@ function renderBatchResults(successes, errors) {
       </div>
       <div class="actions mt-1">
         <button class="secondary" id="batchDownloadAll">📦 Descargar informe completo (PDF único)</button>
+        <button class="secondary" id="batchDownloadTranscripts">📝 Descargar transcripciones completas (PDF)</button>
         <button class="secondary" id="batchClearResults">🗑 Limpiar resultados</button>
       </div>
     </div>`;
@@ -661,6 +662,9 @@ function bindEvents() {
 
   const batchDlAll = app.querySelector("#batchDownloadAll");
   if (batchDlAll) batchDlAll.addEventListener("click", downloadAllBatchPdfs);
+
+  const batchDlTranscripts = app.querySelector("#batchDownloadTranscripts");
+  if (batchDlTranscripts) batchDlTranscripts.addEventListener("click", downloadAllTranscriptsPdfs);
 }
 
 /* ============ ANALYZE ============ */
@@ -989,6 +993,61 @@ function downloadAllBatchPdfsSync() {
 
   if (!firstPage) {
     doc.save(`informe-lote-${state.batchResults.filter(r => r.result).length}-articulos-${new Date().toISOString().slice(0, 10)}.pdf`);
+  }
+}
+
+async function downloadAllTranscriptsPdfs() {
+  try { await ensureJsPdf(); } catch { state.error = "No se pudo cargar jsPDF."; render(); return; }
+  downloadAllTranscriptsPdfsSync();
+}
+
+function downloadAllTranscriptsPdfsSync() {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF();
+  let firstPage = true;
+
+  const margin = 15;
+  const pageW = doc.internal.pageSize.getWidth() - margin * 2;
+  const pageH = doc.internal.pageSize.getHeight() - margin;
+
+  for (let i = 0; i < state.batchResults.length; i++) {
+    const br = state.batchResults[i];
+    if (!br.result) continue;
+
+    if (!firstPage) { doc.addPage(); }
+    firstPage = false;
+
+    let y = 20;
+    const addLine = (text, opts = {}) => {
+      if (y > pageH - 10) { doc.addPage(); y = 20; }
+      doc.setFontSize(opts.size || 10);
+      doc.setFont("helvetica", opts.bold ? "bold" : "normal");
+      if (opts.color) doc.setTextColor(...opts.color); else doc.setTextColor(40, 40, 40);
+      const lines = doc.splitTextToSize(String(text), pageW);
+      doc.text(lines, margin, y);
+      y += lines.length * (opts.size || 10) * 0.45 + 3;
+    };
+
+    const meta = br.result.metadata || {};
+    addLine(`ARTÍCULO ${i + 1}`, { size: 14, bold: true, color: [99, 102, 241] });
+    addLine(`Puntuación: ${br.result.overallScore}/100`, { bold: true });
+    addLine(`Título: ${meta.title || "Desconocido"}`);
+    addLine(`Medio: ${meta.outlet || "Desconocido"}  ·  Autor: ${meta.author || "Desconocido"}`);
+    addLine(`Fecha: ${meta.date || "Desconocida"}  ·  Sección: ${meta.section || "Desconocida"}`);
+    y += 5;
+
+    addLine("CONTENIDO ÍNTEGRO", { bold: true, color: [99, 102, 241] });
+    const rawText = br.result.rawArticleText || "Sin texto extraído.";
+
+    // Split large text blocks into chunks that jsPDF can break down without crashing
+    const paragraphs = rawText.split(/\n+/);
+    for (const p of paragraphs) {
+      addLine(p.trim() || " ");
+    }
+  }
+
+  if (!firstPage) {
+    doc.save(`transcripciones-lote-${state.batchResults.filter(r => r.result).length}-articulos-${new Date().toISOString().slice(0, 10)}.pdf`);
   }
 }
 

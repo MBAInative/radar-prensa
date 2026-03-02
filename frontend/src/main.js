@@ -1037,12 +1037,29 @@ function downloadAllTranscriptsPdfsSync() {
     y += 5;
 
     addLine("CONTENIDO ÍNTEGRO", { bold: true, color: [99, 102, 241] });
-    const rawText = br.result.rawArticleText || "Sin texto extraído.";
+    let rawText = br.result.rawArticleText || "Sin texto extraído.";
+    rawText = String(rawText).replace(/[\x00-\x09\x0B-\x0C\x0E-\x1F\x7F]/g, ""); // Remove unbreakable control characters
+
+    console.log(`PDF ${i + 1} - Text length: ${rawText.length} chars. Sample: ${rawText.slice(0, 30)}`);
+
+    if (br.result.ocrHint && rawText.length < 100) {
+      addLine("[ADVERTENCIA: Parece un PDF escaneado sin texto (o con muy poco texto). Se requiere activar OCR (o subir un documento con texto real) para que la IA y esta transcripción funcionen.]", { color: [249, 115, 22] });
+    }
 
     // Split large text blocks into chunks that jsPDF can break down without crashing
     const paragraphs = rawText.split(/\n+/);
     for (const p of paragraphs) {
-      addLine(p.trim() || " ");
+      if (p.trim()) {
+        try {
+          const splitLines = doc.splitTextToSize(p.trim(), pageW);
+          for (const sLine of splitLines) {
+            if (sLine.trim()) addLine(sLine.trim());
+          }
+        } catch (err) {
+          console.error("jsPDF line rendering error", err);
+          addLine("[Error renderizando este párrafo en el PDF]");
+        }
+      }
     }
   }
 

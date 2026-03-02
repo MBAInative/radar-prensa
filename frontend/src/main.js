@@ -739,7 +739,7 @@ async function postEvaluate(payload) {
   let lastErr = null;
   for (const base of BACKEND_CANDIDATES) {
     try {
-      const res = await fetch(`${base}/api/evaluate`, {
+      const res = await fetch(`${base}/api/evaluate?t=${Date.now()}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
@@ -1037,7 +1037,8 @@ function downloadAllTranscriptsPdfsSync() {
     y += 5;
 
     addLine("CONTENIDO ÍNTEGRO", { bold: true, color: [99, 102, 241] });
-    let rawText = br.result.rawArticleText || "Sin texto extraído.";
+    // If rawArticleText is missing but extractedTextLength > 0, the backend is serving an old version of the API
+    let rawText = br.result.rawArticleText || `Sin texto extraído. (Longitud detectada por el servidor: ${br.result.extractedTextLength || 0})`;
     rawText = String(rawText).replace(/[\x00-\x09\x0B-\x0C\x0E-\x1F\x7F]/g, ""); // Remove unbreakable control characters
 
     console.log(`PDF ${i + 1} - Text length: ${rawText.length} chars. Sample: ${rawText.slice(0, 30)}`);
